@@ -1,3 +1,4 @@
 datasets/
 TFT/
 lightning_logs/
+gitignore
