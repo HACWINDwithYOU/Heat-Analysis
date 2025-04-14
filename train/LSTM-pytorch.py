@@ -14,15 +14,15 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # 1. 加载数据
-data = pd.read_csv('measures_v2.csv')
+data = pd.read_csv('../datasets/measures_v2.csv')
 
 # 2. 定义输入特征和目标变量
 features = ['u_q', 'coolant', 'u_d', 'motor_speed', 'i_d', 'i_q', 'torque', 'ambient']
 targets = ['stator_winding', 'stator_tooth', 'pm', 'stator_yoke']
 
 # 3. 定义要排除的profile_id
-exclude_profiles_train = [2, 3, 4]  # 不参与训练的profile
-test_profiles = [5, 6, 7]  # 专门用于测试的profile
+exclude_profiles_train = [2, 4, 20]  # 不参与训练的profile
+test_profiles = [2, 4, 20]  # 专门用于测试的profile
 
 
 # 4. 数据预处理函数
@@ -61,40 +61,67 @@ X_train, y_train, X_test, y_test = prepare_datasets(
     data, exclude=exclude_profiles_train, test_only=test_profiles
 )
 
-print(f"训练集形状: {X_train.shape}, 测试集形状: {X_test.shape}")
+X_train_final, X_val, y_train_final, y_val = train_test_split(
+    X_train, y_train,
+    test_size=0.2,  # 20%训练数据作为验证集
+    random_state=42,
+    shuffle=False    # 保持时间序列顺序
+)
+
+print(f"最终数据集形状 - 训练: {X_train_final.shape}, 验证: {X_val.shape}, 测试: {X_test.shape}")
+
 
 # 6. 数据标准化
 feature_scaler = MinMaxScaler()
 target_scaler = MinMaxScaler()
 
-# 重塑用于缩放
-X_train_reshaped = X_train.reshape(-1, len(features))
-X_train_scaled = feature_scaler.fit_transform(X_train_reshaped)
-X_train = X_train_scaled.reshape(X_train.shape)
+# 训练集标准化
+X_train_final_reshaped = X_train_final.reshape(-1, len(features))
+feature_scaler.fit(X_train_final_reshaped)  # 仅用训练集拟合
+X_train_final_scaled = feature_scaler.transform(X_train_final_reshaped)
+X_train_final = X_train_final_scaled.reshape(X_train_final.shape)
 
-y_train = target_scaler.fit_transform(y_train)
+# 验证集标准化（使用训练集的scaler）
+X_val_reshaped = X_val.reshape(-1, len(features))
+X_val_scaled = feature_scaler.transform(X_val_reshaped)
+X_val = X_val_scaled.reshape(X_val.shape)
 
-# 测试集使用训练集的scaler转换
+# 测试集标准化（同上）
 X_test_reshaped = X_test.reshape(-1, len(features))
 X_test_scaled = feature_scaler.transform(X_test_reshaped)
 X_test = X_test_scaled.reshape(X_test.shape)
 
-y_test_scaled = target_scaler.transform(y_test)
+# 目标变量标准化（仅用训练集拟合）
+y_train_final_reshaped = y_train_final.reshape(-1, len(targets))
+target_scaler.fit(y_train_final_reshaped)  # 关键修改：仅用训练集
+y_train_final_scaled = target_scaler.transform(y_train_final_reshaped)
+y_train_final = y_train_final_scaled.reshape(y_train_final.shape)
+
+# 验证集和测试集转换
+y_val_scaled = target_scaler.transform(y_val.reshape(-1, len(targets))).reshape(y_val.shape)
+y_test_scaled = target_scaler.transform(y_test.reshape(-1, len(targets))).reshape(y_test.shape)
+
 
 # 转换为PyTorch张量
-X_train_tensor = torch.FloatTensor(X_train).to(device)
-y_train_tensor = torch.FloatTensor(y_train).to(device)
+X_train_tensor = torch.FloatTensor(X_train_final).to(device)
+y_train_tensor = torch.FloatTensor(y_train_final).to(device)
+X_val_tensor = torch.FloatTensor(X_val).to(device)
+y_val_tensor = torch.FloatTensor(y_val_scaled).to(device)
 X_test_tensor = torch.FloatTensor(X_test).to(device)
 y_test_tensor = torch.FloatTensor(y_test_scaled).to(device)
 
 # 创建DataLoader
 train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
-test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
+val_dataset = TensorDataset(X_val_tensor, torch.FloatTensor(y_val_scaled).to(device))
+test_dataset = TensorDataset(X_test_tensor, torch.FloatTensor(y_test_scaled).to(device))
 
-batch_size = 512
+batch_size = 256
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)  # 验证集不shuffle
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
+print("训练目标变量范围：", y_train_final_scaled.min(), y_train_final_scaled.max())  # 应接近[0,1]
+print("验证目标变量范围：", y_val_scaled.min(), y_val_scaled.max())  # 可能略微超出[0,1]
 
 # 7. 构建PyTorch LSTM模型
 class LSTMModel(nn.Module):
@@ -144,21 +171,58 @@ output_size = len(targets)
 model = LSTMModel(input_size, hidden_size, num_layers, output_size).to(device)
 print(model)
 
+
+class TemporalSmoothLoss(nn.Module):
+    def __init__(self, base_loss=nn.MSELoss(), alpha=0.3, lookback=3):
+        """
+        :param alpha: 平滑项权重 (0.1-0.5)
+        :param lookback: 考虑的时间回溯步长
+        """
+        super().__init__()
+        self.base_loss = base_loss
+        self.alpha = alpha
+        self.lookback = lookback
+
+    def forward(self, outputs, targets):
+        # 基础损失
+        loss = self.base_loss(outputs, targets)
+
+        # 时间平滑惩罚项 (考虑多个时间步的差分)
+        if outputs.shape[0] > self.lookback:
+            time_diff = 0
+            for i in range(1, self.lookback + 1):
+                diff = torch.mean(torch.abs(outputs[i:] - outputs[:-i]))
+                time_diff += diff / i  # 越近的时间步权重越高
+            loss += self.alpha * (time_diff / self.lookback)
+
+        return loss
+
 # 8. 训练配置
-criterion = nn.MSELoss()
+# criterion = nn.MSELoss()
+criterion = TemporalSmoothLoss(base_loss=nn.MSELoss(), alpha=0.3, lookback=3)
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
 # 早停机制
-early_stopping_patience = 15
+early_stopping_patience = 999
 best_loss = float('inf')
 patience_counter = 0
 
 
 # 训练函数
-def train_model(model, train_loader, criterion, optimizer, epochs=100):
+# 在训练前初始化记录器
+train_losses = []
+val_losses = []
+learning_rates = []
+
+
+def train_model(model, train_loader, val_loader, criterion, optimizer, epochs=100):
     model.train()
+    global best_loss, patience_counter
+
     for epoch in range(epochs):
+        # 训练阶段
+        model.train()
         total_loss = 0
         progress_bar = tqdm(train_loader, desc=f'Epoch {epoch + 1}/{epochs}')
 
@@ -168,35 +232,100 @@ def train_model(model, train_loader, criterion, optimizer, epochs=100):
             loss = criterion(outputs, batch_y)
             loss.backward()
             optimizer.step()
-
             total_loss += loss.item()
             progress_bar.set_postfix({'loss': loss.item()})
 
-        avg_loss = total_loss / len(train_loader)
-        print(f'Epoch {epoch + 1}, Loss: {avg_loss:.4f}')
+        # 验证阶段
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for batch_X, batch_y in val_loader:
+                outputs = model(batch_X)
+                val_loss += criterion(outputs, batch_y).item()
 
-        # 早停检查
-        global best_loss, patience_counter
-        if avg_loss < best_loss:
-            best_loss = avg_loss
+        avg_train_loss = total_loss / len(train_loader)
+        avg_val_loss = val_loss / len(val_loader)
+
+        # 记录数据
+        train_losses.append(avg_train_loss)
+        val_losses.append(avg_val_loss)
+        learning_rates.append(optimizer.param_groups[0]['lr'])
+
+        print(f'Epoch {epoch + 1}, Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}')
+
+        # 改进的早停机制
+        if avg_val_loss < best_loss:
+            best_loss = avg_val_loss
             patience_counter = 0
             torch.save(model.state_dict(), 'best_model.pth')
+            print(f"Validation loss improved to {best_loss:.4f}, saving model...")
         else:
             patience_counter += 1
+            print(f"Validation loss did not improve for {patience_counter}/{early_stopping_patience} epochs")
             if patience_counter >= early_stopping_patience:
-                print(f'Early stopping at epoch {epoch + 1}')
+                print(f'Early stopping triggered at epoch {epoch + 1}')
                 break
 
         # 学习率调整
-        scheduler.step(avg_loss)
+        scheduler.step(avg_val_loss)  # 根据验证损失调整
+
 
 
 # 开始训练
-train_model(model, train_loader, criterion, optimizer, epochs=100)
+train_model(model, train_loader, val_loader, criterion, optimizer, epochs=40)
+
+torch.save(model.state_dict(), 'last_model.pth')
 
 # 加载最佳模型
 model.load_state_dict(torch.load('best_model.pth'))
 
+
+def plot_training_curves():
+    plt.figure(figsize=(15, 10))
+
+    # Loss曲线
+    plt.subplot(2, 2, 1)
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.title('Training and Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.grid(True)
+
+    # MSE曲线（假设记录了MSE）
+    plt.subplot(2, 2, 2)
+    plt.plot(val_losses, label='Validation MSE', color='red')  # 如果是MSE损失
+    plt.title('Validation MSE')
+    plt.xlabel('Epoch')
+    plt.ylabel('MSE')
+    plt.grid(True)
+
+    # 学习率曲线
+    plt.subplot(2, 2, 3)
+    plt.plot(learning_rates, label='Learning Rate', color='green')
+    plt.title('Learning Rate Schedule')
+    plt.xlabel('Epoch')
+    plt.ylabel('LR')
+    plt.grid(True)
+    plt.yscale('log')  # 对数尺度更清晰
+
+    # 损失差值曲线
+    plt.subplot(2, 2, 4)
+    loss_diff = [t - v for t, v in zip(train_losses, val_losses)]
+    plt.plot(loss_diff, label='Train-Val Difference', color='purple')
+    plt.title('Generalization Gap (Train - Val)')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss Difference')
+    plt.grid(True)
+
+    plt.tight_layout()
+    plt.savefig('training_curves.png')  # 保存图像
+    plt.show()
+
+
+# 训练后调用
+plot_training_curves()
 
 # 9. 评估模型
 def evaluate_model(model, test_loader, target_scaler):
@@ -221,14 +350,17 @@ def evaluate_model(model, test_loader, target_scaler):
 
     # 反标准化
     y_pred = target_scaler.inverse_transform(y_pred_scaled)
-    y_true = target_scaler.inverse_transform(y_true_scaled)
+    y_true = y_true_scaled  # 不再反标准化真实值
+    # y_true = y_true_scaled
 
     # 计算指标
-    mse = np.mean((y_true - y_pred) ** 2)
-    mae = np.mean(np.abs(y_true - y_pred))
+    scaled_mse = np.mean((y_true_scaled - y_pred_scaled) ** 2)
 
-    print(f"\n测试集 MSE (原始尺度): {mse:.4f}")
-    print(f"测试集 MAE (原始尺度): {mae:.4f}")
+    # 2. 原始尺度下的误差（用于业务报告）
+    original_mse = np.mean((target_scaler.inverse_transform(y_true_scaled) - y_pred) ** 2)
+
+    print(f"标准化尺度 MSE: {scaled_mse:.4f}")
+    print(f"原始尺度 MSE: {original_mse:.4f}")
 
     return y_true, y_pred
 

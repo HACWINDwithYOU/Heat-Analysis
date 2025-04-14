@@ -7,11 +7,11 @@ import matplotlib.pyplot as plt
 import os
 
 # 配置设置
-MODEL_PATH = 'complex_lstm_model.keras'
-FEATURE_SCALER_PATH = 'feature_scaler.save'
-TARGET_SCALER_PATH = 'target_scaler.save'
-DATA_PATH = 'measures_v2.csv'  # 原始数据路径
-PROFILE_ID_TO_PREDICT = 4  # 要预测的profile_id
+MODEL_PATH = '../models/casual_lstm_e234.keras'
+FEATURE_SCALER_PATH = '../models/feature_scaler.save'
+TARGET_SCALER_PATH = '../models/target_scaler.save'
+DATA_PATH = '../datasets/measures_v2.csv'  # 原始数据路径
+PROFILE_ID_TO_PREDICT = 2  # 要预测的profile_id
 TIME_STEPS = 10  # 与训练时一致
 
 
@@ -123,7 +123,7 @@ def main():
         **{f'pred_{target}': y_pred[:, i] for i, target in enumerate(targets)}
     })
     # results.to_csv(f'profile_{PROFILE_ID_TO_PREDICT}_predictions.csv', index=False)
-    print(f"\n预测结果已保存到 profile_{PROFILE_ID_TO_PREDICT}_predictions.csv")
+    # print(f"\n预测结果已保存到 profile_{PROFILE_ID_TO_PREDICT}_predictions.csv")
 
 
 if __name__ == "__main__":

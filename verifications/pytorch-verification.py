@@ -9,11 +9,11 @@ import matplotlib.pyplot as plt
 import os
 
 # 配置设置
-MODEL_PATH = 'pytorch_lstm_model.pth'
-FEATURE_SCALER_PATH = 'feature_scaler.save'
-TARGET_SCALER_PATH = 'target_scaler.save'
-DATA_PATH = 'measures_v2.csv'  # 原始数据路径
-PROFILE_ID_TO_PREDICT = 4  # 要预测的profile_id
+MODEL_PATH = '../train/last_model.pth'
+FEATURE_SCALER_PATH = '../train/feature_scaler.save'
+TARGET_SCALER_PATH = '../train/target_scaler.save'
+DATA_PATH = '../datasets/measures_v2.csv'  # 原始数据路径
+PROFILE_ID_TO_PREDICT = 32  # 要预测的profile_id
 TIME_STEPS = 10  # 与训练时一致
 
 # 检查GPU可用性
@@ -172,7 +172,7 @@ def main():
         **{f'true_{target}': y_true_original[:, i] for i, target in enumerate(targets)},
         **{f'pred_{target}': y_pred[:, i] for i, target in enumerate(targets)}
     })
-    results.to_csv(f'profile_{PROFILE_ID_TO_PREDICT}_predictions.csv', index=False)
+    # results.to_csv(f'profile_{PROFILE_ID_TO_PREDICT}_predictions.csv', index=False)
     print(f"\n预测结果已保存到 profile_{PROFILE_ID_TO_PREDICT}_predictions.csv")
 
 
