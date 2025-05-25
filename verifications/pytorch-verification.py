@@ -13,7 +13,7 @@ MODEL_PATH = '../train/last_model.pth'
 FEATURE_SCALER_PATH = '../train/feature_scaler.save'
 TARGET_SCALER_PATH = '../train/target_scaler.save'
 DATA_PATH = '../datasets/measures_v2.csv'  # 原始数据路径
-PROFILE_ID_TO_PREDICT = 32  # 要预测的profile_id
+PROFILE_ID_TO_PREDICT = 2  # 要预测的profile_id
 TIME_STEPS = 10  # 与训练时一致
 
 # 检查GPU可用性
@@ -121,7 +121,8 @@ def predict_and_visualize(model, X, y_true, target_scaler, targets):
 
     # 反标准化
     y_pred = target_scaler.inverse_transform(y_pred_scaled)
-    # y_true_original = target_scaler.inverse_transform(y_true) if y_true.shape[1] == len(targets) else y_true
+    #y_true_original = target_scaler.inverse_transform(y_true) if y_true.shape[1] == len(targets) else y_true
+    #y_true_original = target_scaler.inverse_transform(y_true.reshape(-1, len(targets))).reshape(y_true.shape)
     y_true_original = y_true
 
     # 计算指标

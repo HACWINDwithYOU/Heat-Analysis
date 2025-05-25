@@ -124,12 +124,14 @@ print("训练目标变量范围：", y_train_final_scaled.min(), y_train_final_s
 print("验证目标变量范围：", y_val_scaled.min(), y_val_scaled.max())  # 可能略微超出[0,1]
 
 # 7. 构建PyTorch LSTM模型
-class LSTMModel(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, output_size):
-        super(LSTMModel, self).__init__()
+class AutoregressiveLSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, prediction_steps=1):
+        super(AutoregressiveLSTM, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.prediction_steps = prediction_steps
 
+        # 主LSTM层
         self.lstm = nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
@@ -137,29 +139,47 @@ class LSTMModel(nn.Module):
             batch_first=True,
             dropout=0.2 if num_layers > 1 else 0
         )
-        self.bn1 = nn.BatchNorm1d(hidden_size)
-        self.dropout = nn.Dropout(0.3)
-        self.fc1 = nn.Linear(hidden_size, 64)
-        self.fc2 = nn.Linear(64, output_size)
 
-    def forward(self, x):
+        # 输出层
+        self.fc = nn.Sequential(
+            nn.BatchNorm1d(hidden_size),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_size, 64),
+            nn.ReLU(),
+            nn.Linear(64, output_size)
+        )
+
+        # 自回归反馈层
+        self.feedback = nn.Linear(output_size, input_size)
+
+    def forward(self, x, future=0):
+        # x shape: (batch, seq_len, input_size)
+        batch_size = x.size(0)
+        outputs = []
+
         # 初始化隐藏状态
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(device)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(device)
+        h_t = torch.zeros(self.num_layers, batch_size, self.hidden_size).to(x.device)
+        c_t = torch.zeros(self.num_layers, batch_size, self.hidden_size).to(x.device)
 
-        # LSTM前向传播
-        out, _ = self.lstm(x, (h0, c0))
+        # 处理输入序列
+        for t in range(x.size(1)):
+            _, (h_t, c_t) = self.lstm(x[:, t:t + 1, :], (h_t, c_t))
 
-        # 只取最后一个时间步的输出
-        out = out[:, -1, :]
+        # 自回归预测
+        last_output = x[:, -1:, :]
+        for _ in range(self.prediction_steps if future == 0 else future):
+            # 通过LSTM
+            _, (h_t, c_t) = self.lstm(last_output, (h_t, c_t))
 
-        # 全连接层
-        out = self.bn1(out)
-        out = self.dropout(out)
-        out = torch.relu(self.fc1(out))
-        out = self.fc2(out)
+            # 通过全连接层
+            out = self.fc(h_t[-1])  # 取最后一层的隐藏状态
+            outputs.append(out.unsqueeze(1))
 
-        return out
+            # 反馈到输入
+            if self.feedback is not None:
+                last_output = self.feedback(out).unsqueeze(1)
+
+        return torch.cat(outputs, dim=1)  # (batch, prediction_steps, output_size)
 
 
 # 初始化模型
@@ -168,34 +188,9 @@ hidden_size = 128
 num_layers = 2
 output_size = len(targets)
 
-model = LSTMModel(input_size, hidden_size, num_layers, output_size).to(device)
+model = AutoregressiveLSTM(input_size, hidden_size, num_layers, output_size).to(device)
 print(model)
 
-
-class TemporalSmoothLoss(nn.Module):
-    def __init__(self, base_loss=nn.MSELoss(), alpha=0.3, lookback=3):
-        """
-        :param alpha: 平滑项权重 (0.1-0.5)
-        :param lookback: 考虑的时间回溯步长
-        """
-        super().__init__()
-        self.base_loss = base_loss
-        self.alpha = alpha
-        self.lookback = lookback
-
-    def forward(self, outputs, targets):
-        # 基础损失
-        loss = self.base_loss(outputs, targets)
-
-        # 时间平滑惩罚项 (考虑多个时间步的差分)
-        if outputs.shape[0] > self.lookback:
-            time_diff = 0
-            for i in range(1, self.lookback + 1):
-                diff = torch.mean(torch.abs(outputs[i:] - outputs[:-i]))
-                time_diff += diff / i  # 越近的时间步权重越高
-            loss += self.alpha * (time_diff / self.lookback)
-
-        return loss
 
 # 8. 训练配置
 criterion = nn.MSELoss()
@@ -272,7 +267,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, epochs=10
 
 
 # 开始训练
-train_model(model, train_loader, val_loader, criterion, optimizer, epochs=2)
+train_model(model, train_loader, val_loader, criterion, optimizer, epochs=20)
 
 torch.save(model.state_dict(), 'last_model.pth')
 
